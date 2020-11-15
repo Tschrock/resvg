@@ -2,8 +2,8 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-use std::io::Write;
-use std::path;
+use std::io::{self, Read, Write};
+use std::path::{self, Path};
 
 use usvg::{NodeExt, SystemFontDB};
 
@@ -39,15 +39,22 @@ fn process() -> Result<(), String> {
     // Do not print warning during the ID querying.
     //
     // Some crates still can print to stdout/stderr, but we can't do anything about it.
-    if !(args.query_all || args.quiet) {
+    if !(args.query_all || args.quiet || args.out_png == OutputTo::Stdout) {
         if let Ok(()) = log::set_logger(&LOGGER) {
             log::set_max_level(log::LevelFilter::Warn);
         }
     }
 
     // Load file.
+    let input_str: String = match &args.in_svg {
+        InputFrom::Stdin => load_stdin(),
+        InputFrom::File(ref path) => {
+            usvg::load_svg_file(Path::new(path)).map_err(|e| e.to_string())
+        }
+    }?;
+
     let tree = timed!(args, "Preprocessing",
-        usvg::Tree::from_file(&args.in_svg, &args.usvg).map_err(|e| e.to_string())
+        usvg::Tree::from_str(&input_str, &args.usvg).map_err(|e| e.to_string())
     )?;
 
     if args.query_all {
@@ -59,13 +66,8 @@ fn process() -> Result<(), String> {
         dump_svg(&tree, dump_path)?;
     }
 
-    let out_png = match args.out_png {
-        Some(ref path) => path.clone(),
-        None => return Ok(()),
-    };
-
     // Render.
-    render_svg(args, &tree, &out_png)
+    render_svg(args, &tree)
 }
 
 fn query_all(tree: &usvg::Tree) -> Result<(), String> {
@@ -101,7 +103,7 @@ fn query_all(tree: &usvg::Tree) -> Result<(), String> {
     Ok(())
 }
 
-fn render_svg(args: Args, tree: &usvg::Tree, out_png: &path::Path) -> Result<(), String> {
+fn render_svg(args: Args, tree: &usvg::Tree) -> Result<(), String> {
     let img = if let Some(ref id) = args.export_id {
         if let Some(node) = tree.root().descendants().find(|n| &*n.id() == id) {
             timed!(args, "Rendering",
@@ -117,7 +119,14 @@ fn render_svg(args: Args, tree: &usvg::Tree, out_png: &path::Path) -> Result<(),
     match img {
         Some(img) => {
             timed!(args, "Saving",
-                img.save_png(out_png).map_err(|e| e.to_string()))
+                match args.out_png {
+                    OutputTo::Stdout => {
+                            img.write_png(io::stdout()).map_err(|e| e.to_string())
+                    }
+                    OutputTo::File(ref path) => {
+                            img.save_png(path).map_err(|e| e.to_string())
+                    }
+            })
         }
         None => {
             Err("failed to allocate an image".to_string())
@@ -351,8 +360,8 @@ fn parse_languages(s: &str) -> Result<Vec<String>, String> {
 }
 
 struct Args {
-    in_svg: path::PathBuf,
-    out_png: Option<path::PathBuf>,
+    in_svg: InputFrom,
+    out_png: OutputTo,
     query_all: bool,
     export_id: Option<String>,
     dump: Option<path::PathBuf>,
@@ -361,6 +370,18 @@ struct Args {
     usvg: usvg::Options,
     fit_to: usvg::FitTo,
     background: Option<usvg::Color>,
+}
+
+#[derive(Clone, PartialEq, Debug)]
+enum InputFrom {
+    Stdin,
+    File(String),
+}
+
+#[derive(Clone, PartialEq, Debug)]
+enum OutputTo {
+    Stdout,
+    File(String),
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -382,12 +403,24 @@ fn parse_args() -> Result<Args, String> {
         return Err("<in-svg> and <out-png> must be set".to_string());
     }
 
-    let in_svg: path::PathBuf = args.free[0].to_string().into();
+    let (in_svg, out_png) = {
+        let in_svg = &args.free[0];
+        let out_png = args.free.get(1);
+        let out_png = out_png.map(String::as_ref);
 
-    let out_png = if !args.query_all {
-        Some(args.free[1].to_string().into())
-    } else {
-        None
+        let svg_from = if in_svg == "-" {
+            InputFrom::Stdin
+        } else {
+            InputFrom::File(in_svg.to_string())
+        };
+
+        let png_to = if let Some("-") = out_png {
+            OutputTo::Stdout
+        } else {
+            OutputTo::File(out_png.unwrap().to_string())
+        };
+
+        (svg_from, png_to)
     };
 
     let dump = args.dump_svg.as_ref().map(|v| v.into());
@@ -409,7 +442,10 @@ fn parse_args() -> Result<Args, String> {
     let fontdb = timed!(args, "FontDB init", load_fonts(&mut args));
 
     let usvg = usvg::Options {
-        path: Some(in_svg.clone()),
+        path: match in_svg {
+            InputFrom::Stdin => None,
+            InputFrom::File(ref f) => Some(f.into()),
+        },
         dpi: args.dpi as f64,
         font_family: args.font_family.take().unwrap_or_else(|| "Times New Roman".to_string()),
         font_size: args.font_size as f64,
@@ -420,10 +456,10 @@ fn parse_args() -> Result<Args, String> {
         keep_named_groups,
         fontdb,
     };
-
+    
     Ok(Args {
-        in_svg: in_svg.clone(),
-        out_png,
+        in_svg: in_svg,
+        out_png: out_png,
         query_all: args.query_all,
         export_id,
         dump,
@@ -475,6 +511,17 @@ fn load_fonts(args: &mut CliArgs) -> usvg::fontdb::Database {
     fontdb
 }
 
+fn load_stdin() -> Result<String, String> {
+    let mut s = String::new();
+    let stdin = io::stdin();
+    let mut handle = stdin.lock();
+
+    handle
+        .read_to_string(&mut s)
+        .map_err(|_| format!("provided data has not an UTF-8 encoding"))?;
+
+    Ok(s)
+}
 
 /// A simple stderr logger.
 static LOGGER: SimpleLogger = SimpleLogger;

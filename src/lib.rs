@@ -92,6 +92,18 @@ impl Image {
         let mut writer = encoder.write_header()?;
         writer.write_image_data(&self.data())
     }
+
+    /// Write the image as PNG.
+    pub fn write_png(&self, out: impl std::io::Write) -> Result<(), png::EncodingError> {
+        let ref mut w = std::io::BufWriter::new(out);
+
+        let mut encoder = png::Encoder::new(w, self.width(), self.height());
+        encoder.set_color(png::ColorType::RGBA);
+        encoder.set_depth(png::BitDepth::Eight);
+
+        let mut writer = encoder.write_header()?;
+        writer.write_image_data(&self.data())
+    }
 }
 
 
