@@ -280,7 +280,7 @@ fn shape_text_with_font(
     state: &State,
 ) -> Option<Vec<Glyph>> {
     state.opt.fontdb.with_face_data(font.id, |font_data, face_index| -> Option<Vec<Glyph>> {
-        let rb_font = rustybuzz::Font::from_data(font_data, face_index).unwrap();
+        let rb_font = rustybuzz::Font::from_slice(font_data, face_index).unwrap();
 
         let bidi_info = unicode_bidi::BidiInfo::new(text, Some(unicode_bidi::Level::ltr()));
         let paragraph = &bidi_info.paragraphs[0];
@@ -316,7 +316,7 @@ fn shape_text_with_font(
 
                 glyphs.push(Glyph {
                     byte_idx: ByteIndex::new(idx),
-                    id: GlyphId(info.glyph as u16),
+                    id: GlyphId(info.codepoint as u16),
                     dx: pos.x_offset,
                     dy: pos.y_offset,
                     width: pos.x_advance,
